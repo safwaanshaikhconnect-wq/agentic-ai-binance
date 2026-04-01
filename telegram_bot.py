@@ -24,7 +24,19 @@ TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 
 # Initialize clients
 groq_client = Groq(api_key=GROQ_API_KEY)
-binance = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+binance = None  # Initialize later to handle connection errors
+
+def get_binance_client():
+    """Lazy initialization of Binance client"""
+    global binance
+    if binance is None:
+        try:
+            binance = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+        except Exception as e:
+            logger.error(f"Binance connection error: {e}")
+            # Return a mock client that will fail gracefully
+            return None
+    return binance
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -83,16 +95,20 @@ tools = [
 
 # ── Tool Executor ─────────────────────────────────────────
 def execute_tool(name, args):
+    client = get_binance_client()
+    if client is None:
+        return json.dumps({"error": "Binance service temporarily unavailable from this region"})
+    
     if name == "get_balance":
-        account = binance.get_account()
+        account = client.get_account()
         balances = [b for b in account["balances"] if float(b["free"]) > 0]
         return json.dumps(balances)
     elif name == "get_price":
-        return json.dumps(binance.get_symbol_ticker(symbol=args["symbol"].upper()))
+        return json.dumps(client.get_symbol_ticker(symbol=args["symbol"].upper()))
     elif name == "get_ticker_24h":
-        return json.dumps(binance.get_ticker(symbol=args["symbol"].upper()))
+        return json.dumps(client.get_ticker(symbol=args["symbol"].upper()))
     elif name == "get_order_history":
-        orders = binance.get_all_orders(symbol=args["symbol"].upper(), limit=10)
+        orders = client.get_all_orders(symbol=args["symbol"].upper(), limit=10)
         return json.dumps(orders, default=str)
     return "Tool not found"
 
@@ -185,7 +201,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_portfolio_update(context: ContextTypes.DEFAULT_TYPE):
     """Send periodic portfolio update"""
     try:
-        account = binance.get_account()
+        client = get_binance_client()
+        if client is None:
+            logger.warning("Binance unavailable for portfolio update")
+            return
+        
+        account = client.get_account()
         balances = [b for b in account["balances"] if float(b["free"]) > 0]
         
         message = "📊 Portfolio Update - " + datetime.now().strftime("%Y-%m-%d %H:%M UTC") + "\n\n"
@@ -200,7 +221,7 @@ async def send_portfolio_update(context: ContextTypes.DEFAULT_TYPE):
                 # Try to get USD value if not already USD
                 if symbol != "USDT":
                     try:
-                        ticker = binance.get_symbol_ticker(symbol=f"{symbol}USDT")
+                        ticker = client.get_symbol_ticker(symbol=f"{symbol}USDT")
                         usd_price = float(ticker["price"])
                         usd_value = free * usd_price
                         inr_value = usd_value * 84
